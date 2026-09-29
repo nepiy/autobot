@@ -14,11 +14,23 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Watch OpenSea listings and purchase until the configured quantity is reached.
+    AutoBuy {
+        /// Omit to configure the purchase interactively.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        dry_run: bool,
+    },
     Setup {
         #[arg(long, default_value = "configs")]
         output: PathBuf,
     },
-    RpcTest,
+    RpcTest {
+        /// Benchmark the same network-specific RPC profile used by a mint.
+        #[arg(long)]
+        chain_id: Option<u64>,
+    },
     Simulate {
         #[arg(long)]
         config: PathBuf,

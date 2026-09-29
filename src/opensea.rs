@@ -3,7 +3,7 @@ use crate::{
     security::sanitize_external_text,
 };
 use alloy::{
-    primitives::{Address, U256, address},
+    primitives::{Address, B256, U256, address},
     sol_types::SolInterface,
 };
 use reqwest::{Client, Response};
@@ -155,6 +155,8 @@ pub struct OpenSeaFulfillmentTransaction {
 pub struct OpenSeaClient {
     client: Client,
     api_key: Zeroizing<String>,
+    #[cfg(test)]
+    buy_test_base: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -200,10 +202,111 @@ struct OfferConsideration {
 }
 
 impl OpenSeaClient {
+    fn buy_api_base(&self) -> &str {
+        #[cfg(test)]
+        if let Some(base) = &self.buy_test_base {
+            return base;
+        }
+        OPENSEA_API_BASE
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_buy_test(base: String) -> Self {
+        Self {
+            client: Client::new(),
+            api_key: Zeroizing::new("test".into()),
+            buy_test_base: Some(base),
+        }
+    }
+    pub async fn collection_for_contract(&self, chain_id: u64, address: Address) -> Result<String> {
+        let chain = opensea_chain_slug(chain_id)?;
+        let body = self
+            .buy_api_get(&format!("chain/{chain}/contract/{address:#x}"), &[])
+            .await?;
+        let slug = collection_slug_from_contract_response(&body).ok_or_else(|| {
+            BotError::Config(
+                "OpenSea has no collection for this contract on the selected chain".into(),
+            )
+        })?;
+        if slug.is_empty()
+            || !slug
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(BotError::Transaction(
+                "OpenSea returned an invalid collection slug".into(),
+            ));
+        }
+        Ok(slug.to_owned())
+    }
+
+    pub async fn listing_page(&self, slug: &str, next: Option<&str>) -> Result<Value> {
+        let mut query = vec![("limit", "200")];
+        if let Some(next) = next {
+            query.push(("next", next));
+        }
+        self.buy_api_get(&format!("listings/collection/{slug}/best"), &query)
+            .await
+    }
+
+    async fn buy_api_get(&self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
+        let mut url = reqwest::Url::parse(&format!("{}/{path}", self.buy_api_base()))
+            .map_err(|_| BotError::Config("invalid OpenSea URL".into()))?;
+        url.query_pairs_mut().extend_pairs(query.iter().copied());
+        let response = self
+            .client
+            .get(url)
+            .header("X-API-KEY", self.api_key.as_str())
+            .send()
+            .await
+            .map_err(|_| BotError::OpenSeaTransport)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(BotError::OpenSeaApi {
+                status: status.as_u16(),
+                message: classify_rejection(status.as_u16(), response).await,
+            });
+        }
+        read_json_response(response, "OpenSea returned invalid auto-buy data").await
+    }
+
+    pub async fn build_listing_fulfillment(
+        &self,
+        hash: B256,
+        chain_id: u64,
+        buyer: Address,
+    ) -> Result<OpenSeaOfferFulfillment> {
+        let body = serde_json::json!({
+            "listing": {"hash": hash, "chain": opensea_chain_slug(chain_id)?,
+                "protocol_address": crate::autobuy::SEAPORT},
+            "fulfiller": {"address": buyer}, "recipient": buyer,
+            "units_to_fill": 1, "include_optional_creator_fees": false
+        });
+        let response = self
+            .client
+            .post(format!("{}/listings/fulfillment_data", self.buy_api_base()))
+            .header("X-API-KEY", self.api_key.as_str())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| BotError::OpenSeaTransport)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(BotError::OpenSeaApi {
+                status: status.as_u16(),
+                message: classify_rejection(status.as_u16(), response).await,
+            });
+        }
+        let body =
+            read_json_response(response, "OpenSea returned invalid listing fulfillment").await?;
+        parse_offer_fulfillment(&body)
+    }
+
     pub fn from_env() -> Result<Self> {
         let api_key = std::env::var("OPENSEA_API_KEY").map_err(|_| {
             BotError::Config(
-                "OPENSEA_API_KEY is required for OpenSea minting or auto-sell".to_string(),
+                "OPENSEA_API_KEY is required for OpenSea minting, auto-buy, or auto-sell"
+                    .to_string(),
             )
         })?;
         if api_key.trim().is_empty() {
@@ -221,6 +324,8 @@ impl OpenSeaClient {
         Ok(Self {
             client,
             api_key: Zeroizing::new(api_key),
+            #[cfg(test)]
+            buy_test_base: None,
         })
     }
 
@@ -795,11 +900,12 @@ fn parse_supply(body: &Value, camel_case: &str, snake_case: &str) -> Option<U256
         .or_else(|| value.as_u64().map(U256::from))
 }
 
-fn opensea_chain_slug(chain_id: u64) -> Result<&'static str> {
+pub(crate) fn opensea_chain_slug(chain_id: u64) -> Result<&'static str> {
     match chain_id {
         crate::config::ROBINHOOD_MAINNET_CHAIN_ID => Ok("robinhood"),
         crate::config::INK_MAINNET_CHAIN_ID => Ok("ink"),
         crate::config::HYPEREVM_MAINNET_CHAIN_ID => Ok("hyperevm"),
+        crate::config::ABSTRACT_MAINNET_CHAIN_ID => Ok("abstract"),
         _ => Err(BotError::Config(format!(
             "OpenSea contract verification is not configured for chain ID {chain_id}"
         ))),
@@ -1233,6 +1339,7 @@ mod tests {
         assert_eq!(opensea_chain_slug(4663).unwrap(), "robinhood");
         assert_eq!(opensea_chain_slug(57073).unwrap(), "ink");
         assert_eq!(opensea_chain_slug(999).unwrap(), "hyperevm");
+        assert_eq!(opensea_chain_slug(2741).unwrap(), "abstract");
         assert!(opensea_chain_slug(1).is_err());
         assert_eq!(
             collection_slug_from_contract_response(&json!({

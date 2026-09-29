@@ -31,10 +31,17 @@ async fn main() -> Result<()> {
         .init();
 
     match Cli::parse().command {
+        Some(Command::AutoBuy { config, dry_run }) => {
+            let config = match config {
+                Some(path) => nft_mint_bot::autobuy::AutoBuyConfig::load(&path)?,
+                None => nft_mint_bot::setup::prompt_auto_buy_config()?,
+            };
+            nft_mint_bot::autobuy::run_auto_buy(config, dry_run).await?;
+        }
         Some(Command::Setup { output }) => {
             run_wizard(&output)?;
         }
-        Some(Command::RpcTest) => run_rpc_test().await?,
+        Some(Command::RpcTest { chain_id }) => run_rpc_test(chain_id).await?,
         Some(Command::Simulate { config }) => run_simulation(config).await?,
         Some(Command::Run { config, dry_run }) => run_bot(config, dry_run).await?,
         Some(Command::Start { dry_run }) => run_interactive(dry_run).await?,
@@ -45,8 +52,11 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_rpc_test() -> Result<()> {
-    let rpc = RpcClients::connect_from_env().await?;
+async fn run_rpc_test(chain_id: Option<u64>) -> Result<()> {
+    let rpc = match chain_id {
+        Some(chain_id) => RpcClients::connect_from_env_for_chain(chain_id).await?,
+        None => RpcClients::connect_from_env().await?,
+    };
     println!("RPC LATENCY TEST");
     println!("--------------------------------");
     println!(

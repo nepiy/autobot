@@ -13,3 +13,5 @@ target/
 *secrets*.json
 configs/*.json
 !configs/example.json
+!configs/auto-buy.example.json
+auto-buy-state/

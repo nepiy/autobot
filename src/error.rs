@@ -51,11 +51,17 @@ pub enum BotError {
     )]
     BroadcastOutcomeUnknown { hash: B256 },
 
+    #[error("all configured broadcast endpoints rejected the raw transaction")]
+    BroadcastRejected,
+
     #[error("OpenSea API error ({status}): {message}")]
     OpenSeaApi { status: u16, message: String },
 
     #[error("OpenSea API transport request failed")]
     OpenSeaTransport,
+
+    #[error("USD price temporarily unavailable: {0}")]
+    PriceUnavailable(String),
 
     #[error("manual trigger control error: {0}")]
     ManualTrigger(String),

@@ -40,6 +40,8 @@ impl PriceSnapshot {
 #[derive(Clone)]
 pub struct PriceOracle {
     client: Client,
+    #[cfg(test)]
+    test_prices: Option<PriceSnapshot>,
 }
 
 impl std::fmt::Debug for PriceOracle {
@@ -59,20 +61,36 @@ impl PriceOracle {
             .map_err(|err| {
                 BotError::Transaction(format!("could not create price client: {err}"))
             })?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            #[cfg(test)]
+            test_prices: None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(prices: PriceSnapshot) -> Self {
+        Self {
+            client: Client::new(),
+            test_prices: Some(prices),
+        }
     }
 
     /// Capture a fresh USD price for every currency used by one sell decision.
     ///
     /// Configuration values take precedence over environment values. ETH can
-    /// fall back to the configured HTTP oracle; WETH shares ETH's price. Every
-    /// other currency, including USDG, must have an explicit price so a stable
-    /// coin depeg or a non-ETH gas token cannot silently create a bad sale.
+    /// fall back to the configured HTTP oracle; WETH shares ETH's price.
+    /// HYPE also has a live HTTP feed. Other currencies, including USDG, must
+    /// have an explicit price rather than silently assuming a stablecoin peg.
     pub async fn snapshot(
         &self,
         currencies: &[&str],
         configured_prices: &BTreeMap<String, String>,
     ) -> Result<PriceSnapshot> {
+        #[cfg(test)]
+        if let Some(prices) = &self.test_prices {
+            return Ok(prices.clone());
+        }
         let requested = currencies
             .iter()
             .map(|currency| normalize_currency(currency))
@@ -106,6 +124,7 @@ impl PriceOracle {
             let price = match explicit.or(eth_alias) {
                 Some(price) => price,
                 None if currency == "ETH" || currency == "WETH" => self.fetch_eth_price().await?,
+                None if currency == "HYPE" => self.fetch_hype_price().await?,
                 None => {
                     return Err(BotError::Transaction(format!(
                         "no USD price is configured for `{currency}`; set auto_sell.currency_usd_prices.{currency} or {}",
@@ -217,9 +236,9 @@ impl PriceOracle {
         let response = request
             .send()
             .await
-            .map_err(|_| BotError::Transaction("ETH/USD price request failed".to_string()))?;
+            .map_err(|_| BotError::PriceUnavailable("ETH/USD price request failed".to_string()))?;
         if !response.status().is_success() {
-            return Err(BotError::Transaction(format!(
+            return Err(BotError::PriceUnavailable(format!(
                 "ETH/USD price request returned HTTP {}",
                 response.status()
             )));
@@ -232,6 +251,44 @@ impl PriceOracle {
             parse_coinmarketcap_eth_price(&body)?
         } else {
             parse_coingecko_eth_price(&body)?
+        };
+        parse_price(&text)
+    }
+
+    async fn fetch_hype_price(&self) -> Result<U256> {
+        let endpoint = env::var("HYPE_PRICE_ORACLE_URL").unwrap_or_else(|_| {
+            "https://pro-api.coinmarketcap.com/v3/cryptocurrency/quotes/latest?id=32196&convert=USD".into()
+        });
+        validate_price_endpoint(&endpoint)?;
+        let mut request = self
+            .client
+            .get(&endpoint)
+            .header("accept", "application/json");
+        if let Some((env_name, header_name)) = oracle_api_key_header(&endpoint)
+            && let Ok(key) = env::var(env_name)
+            && !key.trim().is_empty()
+        {
+            request = request.header(header_name, key.trim());
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| BotError::PriceUnavailable("HYPE/USD price request failed".into()))?;
+        if !response.status().is_success() {
+            return Err(BotError::PriceUnavailable(format!(
+                "HYPE/USD price request returned HTTP {}",
+                response.status()
+            )));
+        }
+        let body: Value =
+            crate::opensea::read_json_response(response, "invalid HYPE/USD price response").await?;
+        let text = if is_coinmarketcap_endpoint(&endpoint) {
+            validate_coinmarketcap_status(&body)?;
+            parse_coinmarketcap_asset_price(&body, "32196", "HYPE")?
+        } else {
+            numeric_price_text(body.pointer("/hyperliquid/usd").ok_or_else(|| {
+                BotError::Transaction("HYPE/USD response missing hyperliquid.usd".into())
+            })?)?
         };
         parse_price(&text)
     }
@@ -289,35 +346,40 @@ fn parse_coingecko_eth_price(body: &Value) -> Result<String> {
 }
 
 fn parse_coinmarketcap_eth_price(body: &Value) -> Result<String> {
+    parse_coinmarketcap_asset_price(body, "1027", "ETH")
+}
+
+fn parse_coinmarketcap_asset_price(body: &Value, id: &str, symbol: &str) -> Result<String> {
     let data = body.get("data").ok_or_else(|| {
-        BotError::Transaction("ETH/USD price response did not contain CoinMarketCap data".into())
+        BotError::Transaction(format!(
+            "{symbol}/USD price response did not contain CoinMarketCap data"
+        ))
     })?;
     let asset = match data {
-        Value::Object(records) => records.get("1027").or_else(|| records.get("ETH")),
+        Value::Object(records) => records.get(id).or_else(|| records.get(symbol)),
         Value::Array(records) => records.iter().find(|record| {
-            record
-                .get("id")
-                .is_some_and(is_coinmarketcap_ethereum_record)
-                || record
-                    .get("symbol")
-                    .and_then(Value::as_str)
-                    .is_some_and(|symbol| symbol.eq_ignore_ascii_case("ETH"))
+            record.get("id").is_some_and(|value| {
+                value.as_str() == Some(id) || value.as_u64().is_some_and(|n| n.to_string() == id)
+            }) || record
+                .get("symbol")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.eq_ignore_ascii_case(symbol))
         }),
         _ => None,
     }
     .ok_or_else(|| {
-        BotError::Transaction(
-            "ETH/USD price response did not contain CoinMarketCap Ethereum data".into(),
-        )
+        BotError::Transaction(format!(
+            "{symbol}/USD price response did not contain CoinMarketCap asset {id}"
+        ))
     })?;
     let value = asset
         .get("quote")
         .or_else(|| asset.get("quotes"))
         .and_then(coinmarketcap_usd_quote_price)
         .ok_or_else(|| {
-            BotError::Transaction(
-                "ETH/USD price response did not contain CoinMarketCap quote.USD.price".into(),
-            )
+            BotError::Transaction(format!(
+                "{symbol}/USD price response did not contain CoinMarketCap quote.USD.price"
+            ))
         })?;
     numeric_price_text(value)
 }
@@ -390,14 +452,6 @@ fn parse_json_u64(value: &Value) -> Option<u64> {
         .or_else(|| value.as_str()?.trim().parse::<u64>().ok())
 }
 
-fn is_coinmarketcap_ethereum_record(value: &Value) -> bool {
-    match value {
-        Value::Number(id) => id.as_u64() == Some(1027),
-        Value::String(id) => id == "1027",
-        _ => false,
-    }
-}
-
 fn numeric_price_text(value: &Value) -> Result<String> {
     match value {
         Value::String(text) => Ok(text.clone()),
@@ -461,6 +515,27 @@ pub fn format_usd(value: U256) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selects_hype_usd_from_mixed_coinmarketcap_assets() {
+        for id in [serde_json::json!(32196), serde_json::json!("32196")] {
+            let body = serde_json::json!({"data": [
+                {"id":1027,"symbol":"ETH","quote":[{"symbol":"USD","price":2000}]},
+                {"id":id,"symbol":"HYPE","quote":[{"symbol":"USD","price":40.125}]}
+            ]});
+            assert_eq!(
+                parse_coinmarketcap_asset_price(&body, "32196", "HYPE").unwrap(),
+                "40.125"
+            );
+            assert_eq!(parse_coinmarketcap_eth_price(&body).unwrap(), "2000");
+        }
+        let body = serde_json::json!({"data":{"32196":{"quote":{"USD":{"price":40}}}}});
+        assert_eq!(
+            parse_coinmarketcap_asset_price(&body, "32196", "HYPE").unwrap(),
+            "40"
+        );
+        assert!(parse_coinmarketcap_eth_price(&body).is_err());
+    }
 
     #[test]
     fn converts_eth_and_weth_using_the_same_price() {

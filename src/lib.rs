@@ -1,4 +1,5 @@
 pub mod abi;
+pub mod autobuy;
 pub mod autosell;
 pub mod benchmark;
 pub mod cli;

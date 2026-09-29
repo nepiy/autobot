@@ -31,6 +31,25 @@ fn hyperevm_auto_sell_uses_native_hype_and_rejects_mislabeled_payment() {
 }
 
 #[test]
+fn abstract_auto_sell_uses_the_builtin_opensea_chain_mapping() {
+    let config: MintConfig = serde_json::from_value(serde_json::json!({
+        "name": "Abstract auto-sell",
+        "chain_id": 2741,
+        "contract_address": "0x0000000000000000000000000000000000000001",
+        "quantity": 1,
+        "mint": { "function": "mint(uint256)" },
+        "trigger": { "type": "manual" },
+        "auto_sell": {
+            "enabled": true,
+            "collection_slug": "abstract-collection"
+        }
+    }))
+    .unwrap();
+    assert!(config.validate().is_ok());
+    assert_eq!(config.native_currency_symbol(), "ETH");
+}
+
+#[test]
 fn auto_sell_example_retains_settings_and_rejects_unknown_fields() {
     let value: serde_json::Value =
         serde_json::from_str(include_str!("../configs/example.json")).unwrap();

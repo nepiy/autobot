@@ -1,0 +1,14 @@
+{
+  "chain_id": 4663,
+  "contract_address": "0x0000000000000000000000000000000000000001",
+  "target_price_usd": "50",
+  "price_tolerance_percent": "10",
+  "quantity": 2,
+  "gas_mode": "normal",
+  "max_gas_cost_native": "0.001",
+  "max_failed_gas_cost_native": "0.003",
+  "poll_seconds": 5,
+  "receipt_timeout_seconds": 180,
+  "confirmations": 2,
+  "session": "default"
+}

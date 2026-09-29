@@ -1575,9 +1575,11 @@ fn decode_batch_ids(data: &[u8]) -> Vec<U256> {
     if ids.len() != amounts.len() {
         return Vec::new();
     }
-    ids.chunks_exact(32)
-        .zip(amounts.chunks_exact(32))
-        .filter(|(_, amount)| !U256::from_be_slice(amount).is_zero())
+    ids.as_chunks::<32>()
+        .0
+        .iter()
+        .zip(amounts.as_chunks::<32>().0.iter())
+        .filter(|(_, amount)| !U256::from_be_slice(amount.as_slice()).is_zero())
         .map(|(id, _)| U256::from_be_slice(id))
         .collect()
 }
@@ -1971,6 +1973,7 @@ fn known_chain_slug(chain_id: u64) -> Option<&'static str> {
         crate::config::ROBINHOOD_MAINNET_CHAIN_ID => Some("robinhood"),
         crate::config::INK_MAINNET_CHAIN_ID => Some("ink"),
         crate::config::HYPEREVM_MAINNET_CHAIN_ID => Some("hyperevm"),
+        crate::config::ABSTRACT_MAINNET_CHAIN_ID => Some("abstract"),
         1 => Some("ethereum"),
         8453 => Some("base"),
         137 => Some("matic"),

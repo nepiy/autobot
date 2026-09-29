@@ -12,6 +12,8 @@ use std::{collections::BTreeMap, fs, io::Write, path::Path};
 pub const ROBINHOOD_MAINNET_CHAIN_ID: u64 = 4663;
 pub const INK_MAINNET_CHAIN_ID: u64 = 57073;
 pub const HYPEREVM_MAINNET_CHAIN_ID: u64 = 999;
+pub const ABSTRACT_MAINNET_CHAIN_ID: u64 = 2741;
+pub const ABSTRACT_DEFAULT_MAX_GAS_COST_NATIVE: &str = "0.001";
 pub const ROBINHOOD_DEFAULT_GAS_LIMIT: u64 = 200_000;
 pub const ROBINHOOD_DEFAULT_MAX_GAS_COST_NATIVE: &str = "0.001";
 pub const INK_DEFAULT_GAS_LIMIT: u64 = 230_000;
@@ -630,6 +632,7 @@ impl MintConfig {
                     ROBINHOOD_MAINNET_CHAIN_ID
                         | INK_MAINNET_CHAIN_ID
                         | HYPEREVM_MAINNET_CHAIN_ID
+                        | ABSTRACT_MAINNET_CHAIN_ID
                         | 1
                         | 8453
                         | 137

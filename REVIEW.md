@@ -1,6 +1,6 @@
 # Repository review — 2026-09-05
 
-Reviewed the application modules, tests, example configuration, CLI/setup paths, local Solidity fixture, and CI/security configuration. All concrete application findings listed below were addressed. Two upstream dependency maintenance notices remain, described separately.
+Reviewed the application modules, tests, example configuration, CLI/setup paths, local Solidity fixture, CI/security configuration, and the latest Mintbot performance update (`5914122`). All concrete application findings listed below were addressed. Two upstream dependency maintenance notices remain, described separately.
 
 ## Fixed findings
 
@@ -27,16 +27,18 @@ Reviewed the application modules, tests, example configuration, CLI/setup paths,
 | P2 | [Trigger/manual retry paths could stall or exit early](/Users/nepiy/workspace/auto-seller/src/setup.rs:342) | Keep authenticated manual control available after a closed-mint retry; preserve retry outcomes after reconnect backfill; keep the earliest event confirmation candidate. |
 | P2 | [Invalid view return types survived startup validation](/Users/nepiy/workspace/auto-seller/src/trigger.rs:38) | Require one matching bool/uint output and a numeric target that fits the declared width; validate triggers during config loading. |
 | P3 | [Local control, setup, and shutdown edge cases](/Users/nepiy/workspace/auto-seller/src/wallet.rs:65) | Make lock waiting cancellable, stop setup on EOF, recognize IPv6 loopback RPC URLs, and avoid reporting “no transaction submitted” after stopping receipt monitoring. |
+| P2 | [Normal/aggressive preparation serialized independent work](/Users/nepiy/workspace/auto-seller/src/bot.rs:480) | Overlap OpenSea, fee, balance, and nonce preparation; keep aggressive refreshes responsive and coalesced; add latency regressions, RPC profile selection, endpoint deduplication, and immediate latency reporting. |
 
 Seaport target, routes, and interfaces were checked against the project’s [deployment documentation](https://github.com/ProjectOpenSea/seaport/blob/main/docs/Deployment.md), [order enums](https://github.com/ProjectOpenSea/seaport-types/blob/main/src/lib/ConsiderationEnums.sol), and [canonical interface](https://raw.githubusercontent.com/ProjectOpenSea/seaport-types/main/src/interfaces/ConsiderationInterface.sol).
 
 ## Validation
 
-- Rust 1.94.1: **112 tests passed, zero failed, zero ignored**, including the opt-in Gitleaks regression.
+- Rust 1.94.1: **124 tests passed, zero failed, zero ignored**, including the opt-in Gitleaks regression and normal/aggressive latency regressions.
 - `cargo +1.94.1 clippy --locked --all-targets --all-features -- -D warnings`: passed.
 - `cargo +1.94.1 fmt --all --check`: passed.
 - Gitleaks scan of application source, tests, CI files, public example environment, and project metadata: no leaks found. The real `.env` was not read or copied.
 - Refreshed RustSec database: **no known vulnerabilities reported** in the 487-package lockfile. Unused Alloy full features were removed, reducing the lockfile from 499 packages.
+- `PERFORMANCE.md` documents the controlled request-ordering comparison and the network-specific `rpc-test --chain-id` probes.
 
 Key regressions exercise real local HTTP mock servers for ambiguous broadcasts, replacement receipts, re-mining, and Ink fee queries; receipt fixtures test real ERC-721/ERC-1155 decoding. Mutated Seaport payloads exercise target, asset, amount, ABI, and fulfillment-component rejection.
 
@@ -55,4 +57,4 @@ These are maintenance advisories, not reported exploitable vulnerabilities. Remo
 
 No live wallet transactions or live OpenSea sales were executed. Custom L2 surcharge models other than Ink remain outside the fee estimator. Mock tests cannot establish live contract/API compatibility or guarantee inclusion-time fees.
 
-This directory has no Git metadata. A reviewable patch against the original local files is available at [auto-seller-review.patch](/tmp/auto-seller-review.patch).
+The repository now includes the Mintbot performance update in the current Git working tree. A reviewable patch against the pre-review local files is available at [auto-seller-review.patch](/tmp/auto-seller-review.patch).

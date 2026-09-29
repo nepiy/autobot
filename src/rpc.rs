@@ -14,6 +14,7 @@ use alloy::{
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use reqwest::Url;
 use std::{
+    collections::HashSet,
     env,
     sync::Arc,
     time::{Duration, Instant},
@@ -175,6 +176,7 @@ impl RpcClients {
             crate::config::ROBINHOOD_MAINNET_CHAIN_ID => "ROBINHOOD_",
             crate::config::INK_MAINNET_CHAIN_ID => "INK_",
             crate::config::HYPEREVM_MAINNET_CHAIN_ID => "HYPEREVM_",
+            crate::config::ABSTRACT_MAINNET_CHAIN_ID => "ABSTRACT_",
             _ => "",
         };
         Self::connect_from_env_with_profile(profile).await
@@ -218,7 +220,10 @@ impl RpcClients {
         let ws_connect_latency = ws_started.elapsed();
 
         let mut broadcast = vec![("primary".to_string(), http.clone())];
-        if let Some(backup) = optional_env(&backup_name) {
+        let mut seen_urls = HashSet::from([validate_rpc_url(&http_name, &http_url, false)?]);
+        if let Some(backup) = optional_env(&backup_name)
+            && register_http_endpoint(&mut seen_urls, &backup_name, &backup)?
+        {
             broadcast.push((
                 "backup".to_string(),
                 connect_http(&backup_name, &backup).await?,
@@ -231,6 +236,9 @@ impl RpcClients {
                 .filter(|item| !item.is_empty())
                 .enumerate()
             {
+                if !register_http_endpoint(&mut seen_urls, &broadcast_name, url)? {
+                    continue;
+                }
                 broadcast.push((
                     format!("broadcast-{index}"),
                     connect_http(&broadcast_name, url).await?,
@@ -275,6 +283,10 @@ impl RpcClients {
     }
 
     pub async fn validate_chain(&mut self, config: &MintConfig) -> Result<()> {
+        self.validate_chain_id(config.chain_id).await
+    }
+
+    pub async fn validate_chain_id(&mut self, expected_chain_id: u64) -> Result<()> {
         let ws_chain_id = tokio::time::timeout(self.request_timeout, self.ws.get_chain_id())
             .await
             .map_err(|_| BotError::Rpc("WebSocket chain ID check timed out".to_string()))?
@@ -284,22 +296,22 @@ impl RpcClients {
                     summarize_rpc_error(&err.to_string())
                 ))
             })?;
-        if ws_chain_id != config.chain_id {
+        if ws_chain_id != expected_chain_id {
             return Err(BotError::ChainMismatch {
-                configured: config.chain_id,
+                configured: expected_chain_id,
                 reported: ws_chain_id,
             });
         }
         let mut healthy = Vec::new();
         for (name, provider) in self.broadcast.iter() {
             match tokio::time::timeout(self.request_timeout, provider.get_chain_id()).await {
-                Ok(Ok(chain_id)) if chain_id == config.chain_id => {
+                Ok(Ok(chain_id)) if chain_id == expected_chain_id => {
                     healthy.push((name.clone(), provider.clone()));
                 }
                 Ok(Ok(chain_id)) => {
                     return Err(BotError::Config(format!(
                         "RPC provider `{name}` reports chain ID {chain_id}, expected {}",
-                        config.chain_id
+                        expected_chain_id
                     )));
                 }
                 Ok(Err(err)) => {
@@ -340,6 +352,15 @@ impl RpcClients {
 
     pub async fn validate_contract(&self, config: &MintConfig) -> Result<B256> {
         let contract = config.contract()?;
+        self.validate_contract_address(contract, config.expected_contract_code_hash_value()?)
+            .await
+    }
+
+    pub async fn validate_contract_address(
+        &self,
+        contract: Address,
+        pinned_hash: Option<B256>,
+    ) -> Result<B256> {
         let codes = self
             .read_all("eth_getCode", move |provider| async move {
                 provider.get_code_at(contract).await
@@ -364,7 +385,7 @@ impl RpcClients {
                 "RPC providers returned different bytecode for the configured contract".to_string(),
             ));
         }
-        if let Some(pinned_hash) = config.expected_contract_code_hash_value()?
+        if let Some(pinned_hash) = pinned_hash
             && expected_hash != pinned_hash
         {
             return Err(BotError::Config(format!(
@@ -721,9 +742,7 @@ impl RpcClients {
                 hash: expected_hash,
             });
         }
-        Err(BotError::Transaction(
-            "all configured broadcast endpoints rejected the raw transaction".to_string(),
-        ))
+        Err(BotError::BroadcastRejected)
     }
 }
 
@@ -749,6 +768,12 @@ pub struct LatencySummary {
 async fn connect_http(name: &str, url: &str) -> Result<DynProvider<Ethereum>> {
     let parsed = validate_rpc_url(name, url, false)?;
     Ok(ProviderBuilder::new().connect_http(parsed).erased())
+}
+
+fn register_http_endpoint(seen: &mut HashSet<Url>, name: &str, url: &str) -> Result<bool> {
+    // Compare the complete normalized URL, including path and query. Distinct
+    // provider routes remain independent endpoints.
+    Ok(seen.insert(validate_rpc_url(name, url, false)?))
 }
 
 async fn connect_ws(name: &str, url: &str) -> Result<DynProvider<Ethereum>> {
@@ -890,34 +915,58 @@ pub(crate) mod tests {
     pub(crate) async fn mock_rpc(
         response: fn(serde_json::Value) -> serde_json::Value,
     ) -> (RpcClients, tokio::task::JoinHandle<()>) {
+        mock_rpc_async(move |request| std::future::ready(response(request))).await
+    }
+
+    pub(crate) async fn mock_rpc_async<F, Fut>(
+        response: F,
+    ) -> (RpcClients, tokio::task::JoinHandle<()>)
+    where
+        F: Fn(serde_json::Value) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = serde_json::Value> + Send + 'static,
+    {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
+        let response = Arc::new(response);
         let task = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
             loop {
-                let (socket, _) = listener.accept().await.unwrap();
-                let mut reader = BufReader::new(socket);
-                let mut length = 0;
-                loop {
-                    let mut line = String::new();
-                    reader.read_line(&mut line).await.unwrap();
-                    if line == "\r\n" {
-                        break;
+                tokio::select! {
+                    joined = handlers.join_next(), if !handlers.is_empty() => {
+                        joined.unwrap().unwrap();
                     }
-                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                        length = value.trim().parse::<usize>().unwrap();
+                    socket = listener.accept() => {
+                        let (socket, _) = socket.unwrap();
+                        let response = response.clone();
+                        handlers.spawn(async move {
+                            let mut reader = BufReader::new(socket);
+                            let mut length = 0;
+                            loop {
+                                let mut line = String::new();
+                                assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                                if line == "\r\n" {
+                                    break;
+                                }
+                                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                                    length = value.trim().parse::<usize>().unwrap();
+                                }
+                            }
+                            let mut body = vec![0; length];
+                            reader.read_exact(&mut body).await.unwrap();
+                            let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                            let result = response(request.clone()).await;
+                            let body = if let Some(error) = result.get("__mock_rpc_error") {
+                                serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "error":error})
+                            } else {
+                                serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "result":result})
+                            }.to_string();
+                            let _ = reader.get_mut().write_all(format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+                            ).as_bytes()).await;
+                        });
                     }
                 }
-                let mut body = vec![0; length];
-                reader.read_exact(&mut body).await.unwrap();
-                let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                let result = response(request.clone());
-                let body =
-                    serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "result":result})
-                        .to_string();
-                reader.get_mut().write_all(format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
-                ).as_bytes()).await.unwrap();
             }
         });
         let provider = connect_http("test", &url).await.unwrap();
@@ -935,6 +984,18 @@ pub(crate) mod tests {
             },
             task,
         )
+    }
+
+    #[test]
+    fn duplicate_rpc_urls_are_removed_without_collapsing_distinct_routes() {
+        let mut seen = HashSet::new();
+        assert!(register_http_endpoint(&mut seen, "test", "https://rpc.example").unwrap());
+        assert!(!register_http_endpoint(&mut seen, "test", "https://rpc.example/").unwrap());
+        assert!(register_http_endpoint(&mut seen, "test", "https://rpc.example/route-a").unwrap());
+        assert!(register_http_endpoint(&mut seen, "test", "https://rpc.example/route-b").unwrap());
+        assert!(register_http_endpoint(&mut seen, "test", "https://rpc.example/?route=a").unwrap());
+        assert!(register_http_endpoint(&mut seen, "test", "https://rpc.example/?route=b").unwrap());
+        assert!(register_http_endpoint(&mut seen, "test", "http://rpc.example").is_err());
     }
 
     #[tokio::test]

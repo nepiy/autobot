@@ -50,6 +50,26 @@ fn abstract_auto_sell_uses_the_builtin_opensea_chain_mapping() {
 }
 
 #[test]
+fn arc_auto_sell_uses_native_usdc_accounting() {
+    let config: MintConfig = serde_json::from_value(serde_json::json!({
+        "name": "Arc auto-sell",
+        "chain_id": 5042,
+        "contract_address": "0x0000000000000000000000000000000000000001",
+        "quantity": 1,
+        "mint": { "function": "mint(uint256)" },
+        "trigger": { "type": "manual" },
+        "auto_sell": {
+            "enabled": true,
+            "collection_slug": "arc-collection",
+            "currency_usd_prices": { "USDC": "1" }
+        }
+    }))
+    .unwrap();
+    assert!(config.validate().is_ok());
+    assert_eq!(config.native_currency_symbol(), "USDC");
+}
+
+#[test]
 fn auto_sell_example_retains_settings_and_rejects_unknown_fields() {
     let value: serde_json::Value =
         serde_json::from_str(include_str!("../configs/example.json")).unwrap();

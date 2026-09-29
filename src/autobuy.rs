@@ -3,8 +3,8 @@ use crate::{
     arithmetic::{scale_u64, scale_u128},
     autosell::encode_fulfillment,
     config::{
-        HYPEREVM_MAINNET_CHAIN_ID, INK_MAINNET_CHAIN_ID, OpenSeaExecutionMode, parse_native_amount,
-        parse_usd_amount,
+        ARC_MAINNET_CHAIN_ID, HYPEREVM_MAINNET_CHAIN_ID, INK_MAINNET_CHAIN_ID,
+        OpenSeaExecutionMode, parse_native_amount, parse_usd_amount,
     },
     error::{BotError, Result},
     opensea::{OpenSeaClient, OpenSeaOfferFulfillment, opensea_chain_slug},
@@ -130,6 +130,8 @@ impl AutoBuyConfig {
     pub fn native_symbol(&self) -> &'static str {
         if self.chain_id == HYPEREVM_MAINNET_CHAIN_ID {
             "HYPE"
+        } else if self.chain_id == ARC_MAINNET_CHAIN_ID {
+            "USDC"
         } else {
             "ETH"
         }

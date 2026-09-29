@@ -1974,7 +1974,6 @@ fn known_chain_slug(chain_id: u64) -> Option<&'static str> {
         crate::config::INK_MAINNET_CHAIN_ID => Some("ink"),
         crate::config::HYPEREVM_MAINNET_CHAIN_ID => Some("hyperevm"),
         crate::config::ABSTRACT_MAINNET_CHAIN_ID => Some("abstract"),
-        crate::config::ARC_MAINNET_CHAIN_ID => Some("arc"),
         1 => Some("ethereum"),
         8453 => Some("base"),
         137 => Some("matic"),

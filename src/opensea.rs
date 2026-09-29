@@ -264,7 +264,7 @@ impl OpenSeaClient {
         if !status.is_success() {
             return Err(BotError::OpenSeaApi {
                 status: status.as_u16(),
-                message: classify_rejection(status.as_u16(), response, &self.api_key).await,
+                message: classify_rejection(status.as_u16(), response).await,
             });
         }
         read_json_response(response, "OpenSea returned invalid auto-buy data").await
@@ -294,7 +294,7 @@ impl OpenSeaClient {
         if !status.is_success() {
             return Err(BotError::OpenSeaApi {
                 status: status.as_u16(),
-                message: classify_rejection(status.as_u16(), response, &self.api_key).await,
+                message: classify_rejection(status.as_u16(), response).await,
             });
         }
         let body =
@@ -317,10 +317,6 @@ impl OpenSeaClient {
         let client = Client::builder()
             .timeout(Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(2))
-            .pool_idle_timeout(Duration::from_secs(90))
-            .pool_max_idle_per_host(8)
-            .tcp_keepalive(Duration::from_secs(30))
             .build()
             .map_err(|err| {
                 BotError::Transaction(format!("could not create OpenSea client: {err}"))
@@ -354,7 +350,7 @@ impl OpenSeaClient {
             .map_err(|_| BotError::OpenSeaTransport)?;
         let status = response.status();
         if !status.is_success() {
-            let message = classify_rejection(status.as_u16(), response, &self.api_key).await;
+            let message = classify_rejection(status.as_u16(), response).await;
             return Err(BotError::OpenSeaApi {
                 status: status.as_u16(),
                 message,
@@ -381,22 +377,13 @@ impl OpenSeaClient {
         quantity: u64,
     ) -> Result<OpenSeaMintTransaction> {
         const MAX_ATTEMPTS: usize = 4;
-        let mut backoff_429 = Duration::from_millis(200);
-        let mut backoff_transient = Duration::from_millis(50);
+        let mut delay = Duration::from_millis(100);
         for attempt in 0..MAX_ATTEMPTS {
             match self.build_mint(drop_slug, minter, quantity).await {
                 Ok(mint) => return Ok(mint),
                 Err(error) if attempt + 1 < MAX_ATTEMPTS && is_retryable_mint_error(&error) => {
-                    let delay = if matches!(&error, BotError::OpenSeaApi { status: 429, .. }) {
-                        let delay = backoff_429;
-                        backoff_429 = (backoff_429 * 2).min(Duration::from_millis(800));
-                        delay
-                    } else {
-                        let delay = backoff_transient;
-                        backoff_transient = (backoff_transient * 2).min(Duration::from_millis(400));
-                        delay
-                    };
                     tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_millis(800));
                 }
                 Err(error) => return Err(error),
             }
@@ -417,7 +404,7 @@ impl OpenSeaClient {
             .map_err(|_| BotError::OpenSeaTransport)?;
         let status = response.status();
         if !status.is_success() {
-            let message = classify_rejection(status.as_u16(), response, &self.api_key).await;
+            let message = classify_rejection(status.as_u16(), response).await;
             return Err(BotError::OpenSeaApi {
                 status: status.as_u16(),
                 message,
@@ -451,7 +438,7 @@ impl OpenSeaClient {
             return Ok(None);
         }
         if !status.is_success() {
-            let message = classify_rejection(status.as_u16(), response, &self.api_key).await;
+            let message = classify_rejection(status.as_u16(), response).await;
             return Err(BotError::OpenSeaApi {
                 status: status.as_u16(),
                 message,
@@ -477,7 +464,7 @@ impl OpenSeaClient {
             .map_err(|_| BotError::OpenSeaTransport)?;
         let status = response.status();
         if !status.is_success() {
-            let message = classify_rejection(status.as_u16(), response, &self.api_key).await;
+            let message = classify_rejection(status.as_u16(), response).await;
             return Err(BotError::OpenSeaApi {
                 status: status.as_u16(),
                 message,
@@ -520,7 +507,7 @@ impl OpenSeaClient {
             .map_err(|_| BotError::OpenSeaTransport)?;
         let status = response.status();
         if !status.is_success() {
-            let message = classify_rejection(status.as_u16(), response, &self.api_key).await;
+            let message = classify_rejection(status.as_u16(), response).await;
             return Err(BotError::OpenSeaApi {
                 status: status.as_u16(),
                 message,
@@ -548,7 +535,7 @@ impl OpenSeaClient {
             .map_err(|_| BotError::OpenSeaTransport)?;
         let status = response.status();
         if !status.is_success() {
-            let message = classify_rejection(status.as_u16(), response, &self.api_key).await;
+            let message = classify_rejection(status.as_u16(), response).await;
             return Err(BotError::OpenSeaApi {
                 status: status.as_u16(),
                 message,
@@ -919,7 +906,6 @@ pub(crate) fn opensea_chain_slug(chain_id: u64) -> Result<&'static str> {
         crate::config::INK_MAINNET_CHAIN_ID => Ok("ink"),
         crate::config::HYPEREVM_MAINNET_CHAIN_ID => Ok("hyperevm"),
         crate::config::ABSTRACT_MAINNET_CHAIN_ID => Ok("abstract"),
-        crate::config::ARC_MAINNET_CHAIN_ID => Ok("arc"),
         _ => Err(BotError::Config(format!(
             "OpenSea contract verification is not configured for chain ID {chain_id}"
         ))),
@@ -1083,7 +1069,7 @@ fn parse_u256(value: &str) -> Result<U256> {
         .map_err(|_| BotError::Transaction("OpenSea returned an invalid transaction value".into()))
 }
 
-async fn classify_rejection(status: u16, mut response: Response, api_key: &str) -> String {
+async fn classify_rejection(status: u16, mut response: Response) -> String {
     let mut body = Vec::new();
     while let Ok(Some(chunk)) = response.chunk().await {
         if body
@@ -1096,62 +1082,30 @@ async fn classify_rejection(status: u16, mut response: Response, api_key: &str) 
         body.extend_from_slice(&chunk);
     }
     let body = String::from_utf8_lossy(&body);
-    classify_rejection_body(status, &body.replace(api_key, "[redacted]"))
+    classify_rejection_body(status, &body)
 }
 
 fn classify_rejection_body(status: u16, body: &str) -> String {
-    let lower = body.to_ascii_lowercase();
-    let category = match status {
+    let body = body.to_ascii_lowercase();
+
+    match status {
         400 => "invalid mint request".to_string(),
         401 | 403 => "OpenSea API authorization rejected".to_string(),
         404 => "drop slug was not found".to_string(),
         409 => "drop stage is not active".to_string(),
-        422 if lower.contains("balance")
-            || lower.contains("insufficient funds")
-            || lower.contains("payment") =>
-        {
-            "insufficient native balance for the mint".to_string()
-        }
-        422 if lower.contains("per wallet")
-            || lower.contains("wallet limit")
-            || lower.contains("wallet allowance")
-            || lower.contains("maxtotalmintablebywallet") =>
-        {
-            "wallet mint limit exceeded".to_string()
-        }
-        422 if lower.contains("supply")
-            || lower.contains("sold out")
-            || lower.contains("minted out")
-            || lower.contains("fully minted")
-            || lower.contains("out of stock") =>
-        {
+        422 if body.contains("supply") || body.contains("sold out") => {
             "supply exhausted or unavailable".to_string()
         }
-        422 if lower.contains("allowlist")
-            || lower.contains("allow list")
-            || lower.contains("eligible")
-            || lower.contains("eligibility")
-            || lower.contains("whitelist")
-            || lower.contains("merkle")
-            || lower.contains("proof") =>
+        422 if body.contains("allowlist")
+            || body.contains("eligible")
+            || body.contains("whitelist") =>
         {
             "wallet is not eligible for this stage".to_string()
         }
-        422 if lower.contains("limit")
-            || lower.contains("maximum")
-            || lower.contains("mintable")
-            || lower.contains("allocation")
-            || lower.contains("already minted") =>
-        {
+        422 if body.contains("limit") || body.contains("maximum") => {
             "wallet mint limit exceeded".to_string()
         }
-        422 if lower.contains("balance")
-            || lower.contains("fund")
-            || lower.contains("insufficient")
-            || lower.contains("price")
-            || lower.contains("value")
-            || lower.contains("cost") =>
-        {
+        422 if body.contains("balance") || body.contains("fund") => {
             "insufficient native balance for the mint".to_string()
         }
         422 => {
@@ -1159,12 +1113,6 @@ fn classify_rejection_body(status: u16, body: &str) -> String {
         }
         429 => "OpenSea API rate limit reached".to_string(),
         _ => "request rejected by OpenSea".to_string(),
-    };
-    let snippet = sanitize_external_text(body, 200);
-    if snippet.is_empty() {
-        category
-    } else {
-        format!("{category} — OpenSea said: {snippet}")
     }
 }
 
@@ -1392,7 +1340,6 @@ mod tests {
         assert_eq!(opensea_chain_slug(57073).unwrap(), "ink");
         assert_eq!(opensea_chain_slug(999).unwrap(), "hyperevm");
         assert_eq!(opensea_chain_slug(2741).unwrap(), "abstract");
-        assert_eq!(opensea_chain_slug(5042).unwrap(), "arc");
         assert!(opensea_chain_slug(1).is_err());
         assert_eq!(
             collection_slug_from_contract_response(&json!({

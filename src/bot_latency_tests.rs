@@ -61,7 +61,6 @@ impl Fixture {
             fee_cap: 1_000_000_000,
             available_balance: U256::from(10u64).pow(U256::from(18)),
             opensea_hydrated: false,
-            force_nonce_refresh: false,
         };
         let trigger = TriggerEngine::new(&config).unwrap();
         let (_, manual) = tokio::sync::mpsc::channel(1);
@@ -97,7 +96,6 @@ impl Fixture {
             opensea_client: None,
             auto_opensea_schedule: false,
             opensea_schedule: None,
-            last_breakdown: crate::metrics::PreparationBreakdown::default(),
         }
     }
 

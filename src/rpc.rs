@@ -20,11 +20,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-const CRITICAL_READ_SETTLE_WINDOW: Duration = Duration::from_millis(15);
+const CRITICAL_READ_SETTLE_WINDOW: Duration = Duration::from_millis(75);
 // Gas estimates are already protected by the configured gas default and
 // multiplier. Keep a short cross-provider window for a higher estimate
 // without adding the full consistency delay to the mint critical path.
-const GAS_ESTIMATE_SETTLE_WINDOW: Duration = Duration::from_millis(10);
+const GAS_ESTIMATE_SETTLE_WINDOW: Duration = Duration::from_millis(25);
 
 #[derive(Clone)]
 pub struct RpcClients {
@@ -177,7 +177,6 @@ impl RpcClients {
             crate::config::INK_MAINNET_CHAIN_ID => "INK_",
             crate::config::HYPEREVM_MAINNET_CHAIN_ID => "HYPEREVM_",
             crate::config::ABSTRACT_MAINNET_CHAIN_ID => "ABSTRACT_",
-            crate::config::ARC_MAINNET_CHAIN_ID => "ARC_",
             _ => "",
         };
         Self::connect_from_env_with_profile(profile).await

@@ -17,7 +17,7 @@ Option 1 asks for the network, NFT contract address from OpenSea, target USD pri
 
 - **Price range:** `$50` with `10%` tolerance buys only from `$45` through `$55`, inclusive. A cheaper `$44` listing is outside this requested range. Marketplace and required creator fees are included in the purchase price; gas is separate. USD comparisons use integer arithmetic, and the payable value is rechecked against a fresh USD quote before signing.
 - **Quantity:** purchases execute one at a time. A confirmed NFT transfer increments progress; the bot continues watching until the total is reached. Reverted transactions do not increment progress, and their order hashes are skipped for the rest of the session, including after restart. ERC-721 tokens already purchased in this session are skipped even when OpenSea returns duplicate or stale listings. ERC-1155 orders can supply additional single units.
-- **Networks:** Robinhood (`4663`), Ink (`57073`), HyperEVM (`999`), Abstract (`2741`), and Arc (`5042`) use their existing RPC profiles. Fund native ETH on Robinhood, Ink, and Abstract, HYPE on HyperEVM, or native USDC on Arc.
+- **Networks:** Robinhood (`4663`), Ink (`57073`), HyperEVM (`999`), and Abstract (`2741`) use their existing RPC profiles. Fund native ETH on Robinhood, Ink, and Abstract, or HYPE on HyperEVM.
 - **Gas:** normal bids 1.2× the current EIP-1559 fee estimate; aggressive bids 2×. Both simulate and estimate the actual Seaport call with a 20% gas-limit margin and enforce `max_gas_cost_native`. Abstract uses its own RPC estimate, including pubdata. Ink also reserves L1 data and operator fees. Aggressive bidding cannot guarantee inclusion.
 - **Failed-gas budget:** `max_failed_gas_cost_native` defaults to `0.003` ETH/HYPE per session. Actual gas spent on reverted transactions is saved, including Ink L1/operator fees. A new attempt must fit its estimated maximum gas cost within the remaining loss budget; otherwise the bot stops with a clear error. Changing the session name resets this accounting, so reuse the same session when resuming.
 - **Eligible listings:** fixed-price, single-asset ERC-721/1155 listings paid in native ETH/HYPE through canonical Seaport 1.6. ERC-20 payments (including WETH), swaps, bundles, auctions, criteria orders, and variable-price orders are skipped. The bot watches OpenSea's fulfillable order book, which can differ from the aggregated floor displayed on OpenSea.
@@ -318,7 +318,6 @@ The interactive launcher supports these profiles:
 | Ink mainnet | `57073` | `INK_HTTP_RPC_URL`, `INK_WS_RPC_URL` |
 | HyperEVM mainnet | `999` | `HYPEREVM_HTTP_RPC_URL`, `HYPEREVM_WS_RPC_URL` |
 | Abstract mainnet | `2741` | `ABSTRACT_HTTP_RPC_URL`, `ABSTRACT_WS_RPC_URL` |
-| Arc mainnet | `5042` | `ARC_HTTP_RPC_URL`, `ARC_WS_RPC_URL` |
 
 If either network-specific HTTP or WebSocket variable is filled, that profile is selected and both values must be valid. If a selected network has no profile values, the bot falls back to `HTTP_RPC_URL` and `WS_RPC_URL`.
 
@@ -327,8 +326,6 @@ The included `.env.example` contains Ink’s public HTTPS and WebSocket endpoint
 For HyperEVM, the official HTTPS endpoint is `https://rpc.hyperliquid.xyz/evm` and HYPE is the native gas token. Hyperliquid’s official endpoint does not provide WebSocket JSON-RPC, so configure `HYPEREVM_WS_RPC_URL` with a WSS-capable HyperEVM provider for block monitoring. Keep `HYPEREVM_HTTP_RPC_URL` and any backup/broadcast URLs on HyperEVM. See [Hyperliquid HyperEVM documentation](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/hyperevm).
 
 For Abstract, use `https://api.mainnet.abs.xyz` and `wss://api.mainnet.abs.xyz/ws`, or replace them with dedicated endpoints. Abstract gas estimation includes ZK execution and pubdata overhead, so normal mode estimates the eligible transaction; aggressive mode requires a tested fixed gas limit. See [Abstract network details](https://docs.abs.xyz/connect-to-abstract).
-
-For Arc, use `https://rpc.mainnet.arc.io` and `wss://rpc.mainnet.arc.io/ws`. Arc uses USDC for native gas. Normal OpenSea mode estimates the final SeaDrop calldata; aggressive mode uses an automatic `300000` gas limit. Arc fee accounting uses 18 decimals even though USDC balances are commonly displayed with 6 decimals.
 
 ### Step 7 — Obtain an OpenSea API key if needed
 
@@ -407,11 +404,6 @@ ABSTRACT_HTTP_RPC_URL=https://api.mainnet.abs.xyz
 ABSTRACT_WS_RPC_URL=wss://api.mainnet.abs.xyz/ws
 ABSTRACT_BACKUP_RPC_URL=
 ABSTRACT_BROADCAST_RPC_URLS=
-
-ARC_HTTP_RPC_URL=https://rpc.mainnet.arc.io
-ARC_WS_RPC_URL=wss://rpc.mainnet.arc.io/ws
-ARC_BACKUP_RPC_URL=
-ARC_BROADCAST_RPC_URLS=
 ```
 
 Environment-variable rules:
@@ -441,8 +433,6 @@ To benchmark the same network-specific profile used by a mint, pass its chain ID
 ./target/release/nft-mint-bot rpc-test --chain-id 4663
 ./target/release/nft-mint-bot rpc-test --chain-id 57073
 ./target/release/nft-mint-bot rpc-test --chain-id 999
-./target/release/nft-mint-bot rpc-test --chain-id 2741
-./target/release/nft-mint-bot rpc-test --chain-id 5042
 ```
 
 The interactive startup in Step 10 validates that profile too. It checks chain IDs, deployed contract bytecode, wallet balance, WebSocket subscriptions, and every usable broadcast endpoint before printing `BOT ARMED`.

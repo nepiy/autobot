@@ -70,33 +70,23 @@ impl WalletNonceLock {
             "nft-mint-bot-wallet-{}.lock",
             hex::encode(&digest[..12])
         ));
-        let file = tokio::task::spawn_blocking(move || -> std::io::Result<std::fs::File> {
-            let mut options = OpenOptions::new();
-            options.read(true).write(true).create(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let file = options.open(path)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-            }
-            Ok(file)
-        })
-        .await
-        .map_err(|err| BotError::Wallet(format!("nonce lock task failed: {err}")))??;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(path)?;
         let mut contended = false;
         loop {
             match file.try_lock() {
                 Ok(()) => break,
                 Err(std::fs::TryLockError::WouldBlock) => {
                     contended = true;
-                    // Poll rather than retaining a blocking lock worker, so a
-                    // cancelled waiter cannot keep the runtime alive.
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    // Unlike a blocking file.lock task, cancellation drops
+                    // this waiter immediately and cannot stall runtime exit.
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
             }

@@ -13,12 +13,7 @@ pub const ROBINHOOD_MAINNET_CHAIN_ID: u64 = 4663;
 pub const INK_MAINNET_CHAIN_ID: u64 = 57073;
 pub const HYPEREVM_MAINNET_CHAIN_ID: u64 = 999;
 pub const ABSTRACT_MAINNET_CHAIN_ID: u64 = 2741;
-pub const ARC_MAINNET_CHAIN_ID: u64 = 5042;
 pub const ABSTRACT_DEFAULT_MAX_GAS_COST_NATIVE: &str = "0.001";
-/// Conservative Arc SeaDrop gas limit used by the interactive aggressive mode.
-/// Advanced JSON configurations can override it after a successful estimate.
-pub const ARC_DEFAULT_GAS_LIMIT: u64 = 300_000;
-pub const ARC_DEFAULT_MAX_GAS_COST_NATIVE: &str = "0.1";
 pub const ROBINHOOD_DEFAULT_GAS_LIMIT: u64 = 200_000;
 pub const ROBINHOOD_DEFAULT_MAX_GAS_COST_NATIVE: &str = "0.001";
 pub const INK_DEFAULT_GAS_LIMIT: u64 = 230_000;
@@ -341,7 +336,6 @@ impl MintConfig {
             .as_deref()
             .unwrap_or(match self.chain_id {
                 HYPEREVM_MAINNET_CHAIN_ID => "HYPE",
-                ARC_MAINNET_CHAIN_ID => "USDC",
                 137 => "POL",
                 _ => "ETH",
             })
@@ -639,7 +633,6 @@ impl MintConfig {
                         | INK_MAINNET_CHAIN_ID
                         | HYPEREVM_MAINNET_CHAIN_ID
                         | ABSTRACT_MAINNET_CHAIN_ID
-                        | ARC_MAINNET_CHAIN_ID
                         | 1
                         | 8453
                         | 137

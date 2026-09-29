@@ -125,10 +125,11 @@ impl TriggerEngine {
         let (Some(block_number), Some(block_hash)) = (block_number, block_hash) else {
             return TriggerObservation::NotReady;
         };
-        // Repeated events must not restart the confirmation window forever.
+        // Later events must not restart the confirmation window. A different
+        // hash at the same height replaces a reorged event.
         if self
             .pending_event
-            .is_none_or(|event| block_number < event.block_number)
+            .is_none_or(|event| block_number <= event.block_number)
         {
             self.pending_event = Some(PendingEvent {
                 block_number,

@@ -43,7 +43,6 @@ pub struct PreparedTransaction {
     pub fee_cap: u128,
     pub available_balance: U256,
     pub opensea_hydrated: bool,
-    force_nonce_refresh: bool,
 }
 
 pub async fn run_bot(config_path: PathBuf, dry_run: bool) -> Result<()> {
@@ -426,7 +425,6 @@ pub async fn prepare_transaction(
         fee_cap,
         available_balance,
         opensea_hydrated: false,
-        force_nonce_refresh: false,
     })
 }
 
@@ -884,8 +882,13 @@ async fn monitor_until_trigger(
                     _ => None,
                 };
                 let backfill_can_execute = if backfill_ready.is_some() {
-                    match ensure_transaction_ready(context).await {
-                        Ok(ready) => ready,
+                    match prepare_until_shutdown(context, shutdown_signal()).await {
+                        Ok(Some(ready)) => ready,
+                        Ok(None) => {
+                            context.state.store(BotState::Stopped);
+                            println!("Stopping mint monitor...\nNo transaction submitted.");
+                            return Ok(());
+                        }
                         Err(err) => return Err(err),
                     }
                 } else {
@@ -964,10 +967,11 @@ async fn monitor_block_stream(
                     .await
                 {
                     Ok(TriggerObservation::Ready) => {
-                        match ensure_transaction_ready(context).await {
+                        match prepare_until_shutdown(context, &mut shutdown).await {
                             Err(err) => return Err(MonitorFailure::Execution(err)),
-                            Ok(false) => continue,
-                            Ok(true) => {}
+                            Ok(None) => return Ok(MonitorOutcome::Shutdown),
+                            Ok(Some(false)) => continue,
+                            Ok(Some(true)) => {}
                         }
                         {
                             let validated = Instant::now();
@@ -1038,10 +1042,11 @@ async fn monitor_event_stream(
                         if !event_is_canonical(context, filter).await {
                             continue;
                         }
-                        match ensure_transaction_ready(context).await {
+                        match prepare_until_shutdown(context, &mut shutdown).await {
                             Err(err) => return Err(MonitorFailure::Execution(err)),
-                            Ok(false) => continue,
-                            Ok(true) => {}
+                            Ok(None) => return Ok(MonitorOutcome::Shutdown),
+                            Ok(Some(false)) => continue,
+                            Ok(Some(true)) => {}
                         }
                         {
                             let validated = Instant::now();
@@ -1085,10 +1090,11 @@ async fn monitor_event_stream(
                 if !event_is_canonical(context, filter).await {
                     continue;
                 }
-                match ensure_transaction_ready(context).await {
+                match prepare_until_shutdown(context, &mut shutdown).await {
                     Err(err) => return Err(MonitorFailure::Execution(err)),
-                    Ok(false) => continue,
-                    Ok(true) => {}
+                    Ok(None) => return Ok(MonitorOutcome::Shutdown),
+                    Ok(Some(false)) => continue,
+                    Ok(Some(true)) => {}
                 }
                 {
                     let validated = Instant::now();
@@ -1132,9 +1138,10 @@ async fn monitor_manual(
                     "could not refresh transaction fields for manual trigger".to_string(),
                 )));
             }
-            match ensure_transaction_ready(context).await {
-                Ok(true) => {}
-                Ok(false) => {
+            match prepare_until_shutdown(context, shutdown_signal()).await {
+                Ok(Some(true)) => {}
+                Ok(None) => return Ok(MonitorOutcome::Shutdown),
+                Ok(Some(false)) => {
                     println!(
                         "[INFO] Direct mint contract is closed; waiting for another manual trigger"
                     );
@@ -1194,7 +1201,7 @@ async fn event_is_canonical(context: &mut MonitorContext<'_>, filter: &Filter) -
     let Some((block_number, block_hash)) = context.trigger_engine.pending_event() else {
         return false;
     };
-    let canonical = context
+    let logs = match context
         .rpc
         .logs(
             filter
@@ -1203,12 +1210,18 @@ async fn event_is_canonical(context: &mut MonitorContext<'_>, filter: &Filter) -
                 .to_block(block_number),
         )
         .await
-        .map(|logs| {
-            logs.into_iter().any(|log| {
-                !log.removed && block_hash.is_none_or(|expected| log.block_hash == Some(expected))
-            })
-        })
-        .unwrap_or(false);
+    {
+        Ok(logs) => logs,
+        Err(error) => {
+            // A failed lookup says nothing about canonicality. Keep the event
+            // so the next block can retry instead of losing a one-time trigger.
+            tracing::warn!(%error, "could not verify activation event; retaining it for retry");
+            return false;
+        }
+    };
+    let canonical = logs.into_iter().any(|log| {
+        !log.removed && block_hash.is_none_or(|expected| log.block_hash == Some(expected))
+    });
     if !canonical {
         context.trigger_engine.clear_pending_event();
         tracing::warn!(
@@ -1249,6 +1262,20 @@ async fn ensure_dynamic_fields(context: &mut MonitorContext<'_>) -> bool {
     context.dynamic_fields_healthy
 }
 
+async fn prepare_until_shutdown(
+    context: &mut MonitorContext<'_>,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<Option<bool>> {
+    // Preparation has no submission side effects and is safe to cancel. In
+    // particular, an auto-buy session may hold this wallet's lock indefinitely.
+    // Do not extend this cancellation boundary over signing/broadcast.
+    tokio::select! {
+        biased;
+        _ = shutdown => Ok(None),
+        result = ensure_transaction_ready(context) => result.map(Some),
+    }
+}
+
 async fn ensure_transaction_ready(context: &mut MonitorContext<'_>) -> Result<bool> {
     if context.dry_run {
         return prepare_trigger_transaction(context).await;
@@ -1260,28 +1287,18 @@ async fn ensure_transaction_ready(context: &mut MonitorContext<'_>) -> Result<bo
     let lock = WalletNonceLock::acquire(context.config.chain_id, context.wallet.address).await?;
     let rpc = context.rpc.clone();
     let wallet = context.wallet.address;
-    let refresh_nonce = context.prepared.force_nonce_refresh
-        || !uses_cached_nonce(context.config)
-        || lock.was_contended();
+    // An uncontended lock does not prove the cached nonce is still unused:
+    // another process may have submitted and released it since our last refresh.
+    // Recheck under the lock for every strategy, including retries after reverts.
     let nonce = async {
         let started = Instant::now();
-        let nonce = if refresh_nonce {
-            rpc.preload_nonce(wallet).await.map(Some)?
-        } else {
-            None
-        };
-        Ok((
-            nonce,
-            refresh_nonce.then(|| started.elapsed().as_secs_f64() * 1000.0),
-        )) as Result<(Option<u64>, Option<f64>)>
+        let nonce = rpc.preload_nonce(wallet).await?;
+        Ok((nonce, Some(started.elapsed().as_secs_f64() * 1000.0))) as Result<(u64, Option<f64>)>
     };
     let (ready, (nonce, nonce_ms)) = tokio::try_join!(prepare_trigger_transaction(context), nonce)?;
     context.last_breakdown.nonce_ms = nonce_ms;
     if ready {
-        if let Some(nonce) = nonce {
-            context.prepared.request.set_nonce(nonce);
-        }
-        context.prepared.force_nonce_refresh = false;
+        context.prepared.request.set_nonce(nonce);
         context.nonce_lock = Some(lock);
     }
     Ok(ready)
@@ -1837,8 +1854,24 @@ async fn execute_transaction(
     let raw = signed.encoded_2718();
     state.store(BotState::Broadcasting);
     metrics.broadcast_started = Some(Instant::now());
-    let (hash, rpc_elapsed) = rpc.broadcast_raw(raw).await?;
+    let broadcast = rpc.broadcast_raw(raw).await;
     metrics.first_rpc_response = Some(Instant::now());
+    let hash = match broadcast {
+        Ok((hash, rpc_elapsed)) => {
+            println!(
+                "RPC accepted transaction: {:.3} ms",
+                rpc_elapsed.as_secs_f64() * 1000.0
+            );
+            hash
+        }
+        Err(BotError::BroadcastOutcomeUnknown { hash }) => {
+            // Submission can succeed even if the response is lost. Keep the
+            // nonce lock and follow this hash just as we do for replacements.
+            tracing::warn!(%hash, "mint acknowledgement unavailable; monitoring the signed transaction");
+            hash
+        }
+        Err(error) => return Err(error),
+    };
     state.store(BotState::Submitted);
     println!("\nTRIGGER DETECTED");
     if let (Some(start), Some(end)) = (metrics.signing_started, metrics.signing_completed) {
@@ -1848,10 +1881,6 @@ async fn execute_transaction(
         );
     }
     println!("TX: {hash}");
-    println!(
-        "RPC accepted transaction: {:.3} ms",
-        rpc_elapsed.as_secs_f64() * 1000.0
-    );
     println!("Waiting for receipt...");
     metrics.print();
     let (outcome, receipt) =
@@ -2613,7 +2642,6 @@ mod tests {
             fee_cap: 1,
             available_balance: U256::from(1_000_000_000_000_000u64),
             opensea_hydrated: false,
-            force_nonce_refresh: false,
         };
 
         validate_signing_request(&config, signer, &prepared, &request)
@@ -2862,11 +2890,10 @@ mod tests {
             fee_cap: 1,
             available_balance: U256::from(1_000_000_000_000u64),
             opensea_hydrated: false,
-            force_nonce_refresh: false,
         }
     }
 
-    fn review_receipt(hash: B256, block: u64) -> serde_json::Value {
+    pub(super) fn review_receipt(hash: B256, block: u64) -> serde_json::Value {
         serde_json::json!({"transactionHash":hash,"blockHash":B256::from(U256::from(block).to_be_bytes::<32>()),
             "blockNumber":format!("0x{block:x}"),"from":Address::ZERO,"gasUsed":"0x1",
             "effectiveGasPrice":"0x1","cumulativeGasUsed":"0x1","status":"0x1","logs":[],

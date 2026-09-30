@@ -1,3 +1,35 @@
+# Repository review — 2026-09-30
+
+Reviewed the current EVM client repository at `3d172e1` (mint execution, auto-buy, auto-sell, ABI validation, RPC handling, pricing, configuration/setup, wallet coordination, triggers, tests, local Solidity fixture, and CI). Fixed five reproducible application issues and added five regression tests. The previous review is retained below as historical context; this section describes the current result.
+
+## Fixed findings
+
+| Priority | Finding and impact | Fix and regression coverage |
+|---|---|---|
+| P1 | Cached mint nonces could be reused after another local process released the wallet lock, or after a reverted transaction consumed the nonce. Checking only lock contention did not establish freshness. | Every live mint reloads the pending nonce under the wallet lock, concurrently with preparation. Removed the unused refresh flag. `uncontended_lock_refreshes_every_cached_nonce_strategy` covers both cache strategies. |
+| P2 | A transient `eth_getLogs` failure discarded the sole activation event, leaving an event-driven mint unable to fire. | Failed canonicality lookups retain the pending event for a later block; a successful empty lookup still discards it. `transient_event_lookup_failure_preserves_trigger_for_retry` exercises both cases. |
+| P2 | A lost initial submission reply stopped mint monitoring and released the nonce lock even though the transaction might have been accepted. | Monitor the locally derived signed hash and retain the lock through receipt handling, as already done for replacements. `initial_mint_with_lost_acknowledgement_is_monitored_under_lock` simulates acceptance with a malformed reply and checks confirmation and lock ownership. |
+| P2 | Ctrl+C could not stop trigger preparation while waiting for another session's wallet lock; auto-buy may hold that lock indefinitely. | Make preparation cancellable in block, event, manual, and reconnect paths. Signing/broadcast remains outside this cancellation boundary. `shutdown_cancels_preparation_while_another_session_holds_the_wallet` verifies prompt exit and lock release. |
+| P3 | Rounding a purchase expense upward allowed a native price just below the configured USD minimum to enter the auto-buy band. | Check the floor against the minimum and the ceiling against the maximum, at discovery and immediately before signing. `native_price_band_rejects_sub_micro_dollar_boundary_crossings` covers exact edges and one-wei crossings. |
+
+## Verification
+
+- Rust **1.94.1**, matching CI: `cargo +1.94.1 test --locked --all-targets` passed **156 tests**. The single opt-in scanner test passed separately with `GITLEAKS_BIN=... cargo +1.94.1 test --locked --test security_scan_test -- --ignored`: **157 tests total**.
+- `cargo +1.94.1 clippy --locked --all-targets --all-features -- -D warnings`: passed.
+- `cargo +1.94.1 fmt --all --check`: passed.
+- The full suite and strict Clippy also passed on installed stable Rust 1.98.1.
+- [Gitleaks 8.30.1](https://github.com/gitleaks/gitleaks/releases/tag/v8.30.1), downloaded from the official release and checked against its SHA-256 manifest: no leaks in current tracked source or all 14 local Git commits. The private `.env` and purchase journals were excluded from the source snapshot and were not opened.
+- `cargo-audit 0.22.2` with a refreshed RustSec database: **zero known vulnerabilities** in Cargo.lock. Two upstream maintenance notices remain below.
+- Local mock RPC/OpenSea services exercise failures without submitting real transactions. Test execution initially required sandbox escalation for loopback listeners; the final CI-toolchain run completed successfully.
+
+## Remaining upstream notices and limits
+
+`paste 1.0.15` ([RUSTSEC-2024-0436](https://rustsec.org/advisories/RUSTSEC-2024-0436)) and `derivative 2.2.0` ([RUSTSEC-2024-0388](https://rustsec.org/advisories/RUSTSEC-2024-0388)) remain unmaintained transitive dependencies. RustSec lists no patched versions for these maintenance notices. Removing them requires upstream dependency migration or a maintained fork; they have not been suppressed or replaced with an unreviewed fork.
+
+No live wallet transaction or live marketplace purchase/sale was executed. The review and deterministic tests cannot certify every deployed contract, external API response, chain reorganization, or inclusion-time fee. Security and quality grades remain **B**; live deployment readiness is not certified. Source fixes are local working-tree changes.
+
+---
+
 # Repository review — 2026-09-05
 
 Reviewed the application modules, tests, example configuration, CLI/setup paths, local Solidity fixture, CI/security configuration, and the latest Mintbot performance update (`5914122`). All concrete application findings listed below were addressed. Two upstream dependency maintenance notices remain, described separately.

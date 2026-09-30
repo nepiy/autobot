@@ -869,3 +869,32 @@ async fn pagination_checks_floor_each_cycle_and_keeps_advancing_later_pages() {
     assert_eq!(result.0.token_id, U256::from(1));
     assert_eq!(routes.lock().unwrap().len(), 7);
 }
+
+#[test]
+fn native_price_band_rejects_sub_micro_dollar_boundary_crossings() {
+    let config = config(2741);
+    let prices = PriceSnapshot::from_prices([("ETH", parse_usd_amount("2000").unwrap())]);
+    let oracle = PriceOracle::for_test(prices.clone());
+    let lower = parse_native_amount("0.0225").unwrap();
+    let upper = parse_native_amount("0.0275").unwrap();
+    assert!(
+        config
+            .native_amount_in_price_band(&oracle, &prices, lower)
+            .unwrap()
+    );
+    assert!(
+        config
+            .native_amount_in_price_band(&oracle, &prices, upper)
+            .unwrap()
+    );
+    assert!(
+        !config
+            .native_amount_in_price_band(&oracle, &prices, lower - U256::from(1))
+            .unwrap()
+    );
+    assert!(
+        !config
+            .native_amount_in_price_band(&oracle, &prices, upper + U256::from(1))
+            .unwrap()
+    );
+}

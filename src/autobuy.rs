@@ -8,7 +8,7 @@ use crate::{
     },
     error::{BotError, Result},
     opensea::{OpenSeaClient, OpenSeaOfferFulfillment, opensea_chain_slug},
-    pricing::{PriceOracle, format_usd},
+    pricing::{PriceOracle, PriceSnapshot, format_usd},
     rpc::{RpcClients, simulate_call},
     wallet::{LoadedWallet, WalletNonceLock},
 };
@@ -126,6 +126,19 @@ impl AutoBuyConfig {
     pub fn in_price_band(&self, usd: U256) -> Result<bool> {
         let (lower, upper) = self.price_band()?;
         Ok(usd >= lower && usd <= upper)
+    }
+    fn native_amount_in_price_band(
+        &self,
+        oracle: &PriceOracle,
+        prices: &PriceSnapshot,
+        amount: U256,
+    ) -> Result<bool> {
+        let (lower, upper) = self.price_band()?;
+        // Check both rounded bounds: rounding expenses upward alone can turn
+        // a price just below the user's minimum into an eligible purchase.
+        let floor = oracle.amount_to_usd(prices, self.native_symbol(), amount, 18)?;
+        let ceil = oracle.cost_to_usd(prices, self.native_symbol(), amount, 18)?;
+        Ok(floor >= lower && ceil <= upper)
     }
     pub fn native_symbol(&self) -> &'static str {
         if self.chain_id == HYPEREVM_MAINNET_CHAIN_ID {
@@ -794,8 +807,7 @@ async fn find_purchase(
             {
                 continue;
             }
-            let usd = oracle.cost_to_usd(&snapshot, config.native_symbol(), listing.value, 18)?;
-            if !config.in_price_band(usd)? {
+            if !config.native_amount_in_price_band(oracle, &snapshot, listing.value)? {
                 continue;
             }
             let fulfillment = match client
@@ -884,15 +896,15 @@ async fn find_purchase(
             let fresh = oracle
                 .snapshot(&[config.native_symbol()], &Default::default())
                 .await?;
+            if !config.native_amount_in_price_band(oracle, &fresh, fulfillment.transaction.value)? {
+                continue;
+            }
             let usd = oracle.cost_to_usd(
                 &fresh,
                 config.native_symbol(),
                 fulfillment.transaction.value,
                 18,
             )?;
-            if !config.in_price_band(usd)? {
-                continue;
-            }
             println!(
                 "Matching token {}: {} including marketplace fees.",
                 listing.token_id,

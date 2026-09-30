@@ -639,7 +639,7 @@ The automatic schedule refreshes every 30 seconds normally and every 5 seconds w
 - `normal` is recommended. It starts the OpenSea build, fresh fee lookup, balance lookup, and just-in-time nonce lookup concurrently. Live gas simulation follows using the validated calldata and updated fees, then the exact payment and gas are checked against the fresh balance.
 - `aggressive` minimizes trigger-path RPC work. It prewarms fee, nonce, and balance data without blocking block/event monitoring, uses the configured gas limit, and skips live gas simulation plus the final balance RPC (except Ink's required live surcharge/balance check). If a refresh is in flight at the trigger, it overlaps the OpenSea build; refreshed fields must be valid before signing.
 
-Both modes hold the wallet nonce lock through broadcast acknowledgement. The latency report is printed immediately after submission. See [PERFORMANCE.md](PERFORMANCE.md) for the controlled comparison and the limits of those measurements.
+Both modes reload the pending nonce under the wallet lock and hold that lock through broadcast acknowledgement and receipt monitoring. The latency report is printed immediately after submission. See [PERFORMANCE.md](PERFORMANCE.md) for the controlled comparison and the limits of those measurements.
 
 Aggressive mode still enforces eligibility, calldata, payment, gas-cost, and balance guards, but it carries more risk: changed on-chain state or an insufficient fixed gas limit can produce a reverted transaction that still consumes gas. It requires explicit `gas.gas_limit` and `gas.max_total_gas_cost_native` values.
 
@@ -860,7 +860,7 @@ Nonce modes are:
 
 All modes fetch the pending nonce again under the local wallet lock immediately before signing. The lock stays held through mint receipt monitoring and replacements, then releases before auto-sell acquires it. This coordinates local bot instances; avoid sending unrelated transactions from the same wallet.
 
-Ctrl+C stops an armed monitor without submitting. After a transaction has been submitted, Ctrl+C stops receipt monitoring but cannot cancel the blockchain transaction; keep the printed hash for independent tracking.
+Ctrl+C stops an armed monitor, including trigger preparation waiting for another session's wallet lock, without submitting. After a transaction has been submitted, Ctrl+C stops receipt monitoring but cannot cancel the blockchain transaction; keep the printed hash for independent tracking.
 
 ### Auto-sell payment identity and execution
 
@@ -878,7 +878,7 @@ The setup wizard asks for this address when enabling auto-sell. Currency decimal
 
 Profit calculations round expenses upward and proceeds downward. On Ink, mint and approval costs include the receipt's L1 charge and the historical operator fee; approval and sale estimates include buffered oracle surcharges. The auto-sell gas cap applies to each approval and sale transaction, with the mint gas cap used as a fallback when no sell cap is set. Other custom L2 surcharges remain outside this estimator.
 
-A lost broadcast acknowledgement or receipt timeout reports the signed transaction hash as an unknown outcome. The workflow stops for verification even if `require_usd_price` is false. Timed-out replacements remain in the receipt candidate list. Re-mined receipts must reach the requested confirmation count at their new block height.
+A lost mint broadcast acknowledgement retains the signed transaction hash for receipt monitoring and keeps the wallet nonce lock held. Ambiguous replacements also remain in the receipt candidate list. Auto-sell still stops for verification on a lost broadcast acknowledgement or receipt timeout, even if `require_usd_price` is false. Re-mined receipts must reach the requested confirmation count at their new block height.
 
 ### Regression checks
 

@@ -12,8 +12,9 @@ they do not promise earlier blockchain inclusion.
 - Aggressive mode keeps block and event monitoring responsive while one cache
   refresh is in flight. A trigger overlaps refresh completion with the OpenSea
   build, and failed refreshes cannot authorize signing with an unhealthy cache.
-- Nonce selection remains protected by a cross-process wallet lock held through
-  broadcast acknowledgement.
+- Every live mint rechecks the pending nonce under a cross-process wallet lock,
+  concurrently with preparation. The lock remains held through receipt monitoring,
+  including when the initial broadcast acknowledgement is lost.
 - Final bytecode-pin and Ink surcharge checks run concurrently before signing.
 - Identical HTTP RPC URLs are deduplicated while distinct paths and queries stay
   independent.

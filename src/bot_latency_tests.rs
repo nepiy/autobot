@@ -61,7 +61,6 @@ impl Fixture {
             fee_cap: 1_000_000_000,
             available_balance: U256::from(10u64).pow(U256::from(18)),
             opensea_hydrated: false,
-            force_nonce_refresh: false,
         };
         let trigger = TriggerEngine::new(&config).unwrap();
         let (_, manual) = tokio::sync::mpsc::channel(1);
@@ -565,5 +564,159 @@ async fn refresh_completion_preserves_stage_invalidation_and_retry_flags() {
     context.finish_armed_refresh(Ok(snapshot));
     assert!(!context.prepared.opensea_hydrated);
     assert_eq!(context.prepared.request.nonce, Some(12));
+    server.abort();
+}
+
+#[tokio::test]
+async fn uncontended_lock_refreshes_every_cached_nonce_strategy() {
+    for strategy in [NonceStrategy::Preloaded, NonceStrategy::RefreshEachBlock] {
+        let (rpc, server) = mock_rpc(|request| response(&request)).await;
+        let mut fixture = Fixture::new(rpc, None);
+        fixture.config.nonce_strategy = strategy;
+        // Another process finished using nonce 7 and released the lock before
+        // this trigger. There is no contention, but pending nonce is now 9.
+        let prior_lock = WalletNonceLock::acquire(fixture.config.chain_id, fixture.wallet.address)
+            .await
+            .unwrap();
+        drop(prior_lock);
+        let mut context = fixture.context();
+        assert!(ensure_transaction_ready(&mut context).await.unwrap());
+        assert_eq!(context.prepared.request.nonce, Some(9));
+        assert!(!context.nonce_lock.as_ref().unwrap().was_contended());
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn transient_event_lookup_failure_preserves_trigger_for_retry() {
+    let failed = Arc::new(AtomicUsize::new(0));
+    let calls = failed.clone();
+    let (rpc, server) = mock_rpc_async(move |_| {
+        let result = if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            json!({"__mock_rpc_error": {"code": -32000, "message": "temporarily unavailable"}})
+        } else {
+            json!([])
+        };
+        std::future::ready(result)
+    })
+    .await;
+    let mut fixture = Fixture::new(rpc, None);
+    fixture.config.trigger = MintTrigger::ContractEvent {
+        signature: "SaleStarted()".into(),
+        confirmations: Some(1),
+    };
+    fixture.trigger = TriggerEngine::new(&fixture.config).unwrap();
+    let hash = B256::repeat_byte(7);
+    fixture.trigger.observe_event(Some(100), Some(hash), false);
+    let filter = fixture.trigger.event_filter().unwrap();
+    let mut context = fixture.context();
+    assert!(!event_is_canonical(&mut context, &filter).await);
+    assert_eq!(
+        context.trigger_engine.pending_event(),
+        Some((100, Some(hash)))
+    );
+    // A successful lookup that actually finds no event can discard it.
+    assert!(!event_is_canonical(&mut context, &filter).await);
+    assert_eq!(context.trigger_engine.pending_event(), None);
+    server.abort();
+}
+
+#[tokio::test]
+async fn initial_mint_with_lost_acknowledgement_is_monitored_under_lock() {
+    use std::sync::Mutex;
+    let submitted = Arc::new(Mutex::new(None));
+    let captured = submitted.clone();
+    let (rpc, server) = mock_rpc_async(move |request| {
+        let value = match request["method"].as_str().unwrap() {
+            "eth_blockNumber" => json!("0x64"),
+            "eth_sendRawTransaction" => {
+                let raw = hex::decode(
+                    request["params"][0]
+                        .as_str()
+                        .unwrap()
+                        .trim_start_matches("0x"),
+                )
+                .unwrap();
+                *captured.lock().unwrap() = Some(alloy::primitives::keccak256(raw));
+                Value::Null // malformed acknowledgement after acceptance
+            }
+            "eth_getTransactionReceipt" => {
+                let hash = captured.lock().unwrap().unwrap();
+                super::tests::review_receipt(hash, 100)
+            }
+            _ => response(&request),
+        };
+        std::future::ready(value)
+    })
+    .await;
+    let mut fixture = Fixture::new(rpc, None);
+    let chain = fixture.config.chain_id;
+    let wallet = fixture.wallet.address;
+    let mut context = fixture.context();
+    assert!(ensure_transaction_ready(&mut context).await.unwrap());
+    assert!(context.acquire_trigger());
+    let now = Instant::now();
+    let mut execution = Box::pin(execute_transaction(
+        &mut context,
+        TriggerTiming {
+            received: now,
+            validated: now,
+            acquired: now,
+        },
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut execution)
+            .await
+            .is_err()
+    );
+    assert!(submitted.lock().unwrap().is_some());
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            WalletNonceLock::acquire(chain, wallet)
+        )
+        .await
+        .is_err()
+    );
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(3), execution)
+            .await
+            .unwrap()
+            .unwrap(),
+        MonitorOutcome::Done
+    ));
+    assert_eq!(context.state.load(), BotState::Confirmed);
+    server.abort();
+}
+
+#[tokio::test]
+async fn shutdown_cancels_preparation_while_another_session_holds_the_wallet() {
+    let (rpc, server) = mock_rpc(|_| panic!("no RPC work before lock acquisition")).await;
+    let mut fixture = Fixture::new(rpc, None);
+    let chain = fixture.config.chain_id;
+    let wallet = fixture.wallet.address;
+    let held = WalletNonceLock::acquire(chain, wallet).await.unwrap();
+    let mut context = fixture.context();
+    let shutdown = tokio::time::sleep(Duration::from_millis(20));
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            prepare_until_shutdown(&mut context, shutdown)
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        None
+    );
+    assert!(context.nonce_lock.is_none());
+    assert_eq!(context.state.load(), BotState::WaitingForTrigger);
+    drop(held);
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        WalletNonceLock::acquire(chain, wallet),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     server.abort();
 }
